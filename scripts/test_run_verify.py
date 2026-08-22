@@ -28,10 +28,14 @@ FIXTURES = {
              "artifact": "src/example2.py"},
     "v101": {"chain": "chain-999.json", "rpack": "issue-999.rpack",
              "artifact": "src/example.py"},
+    "v122": {"chain": "chain-997.json", "rpack": "issue-997.rpack",
+             "artifact": "src/example3.py"},
+    "v130": {"chain": "chain-996.json", "rpack": "issue-996.rpack",
+             "artifact": "src/example4.py"},
 }
 
-OUTPUT_KEYS = {"verified", "complete", "bundle-path", "report",
-               "should-fail", "summary-bytes"}
+OUTPUT_KEYS = {"verified", "complete", "attestation", "bundle-path",
+               "report", "should-fail", "summary-bytes"}
 
 COMMENT_MARKER = "<!-- forgeproof-verify -->"
 
@@ -129,6 +133,8 @@ def test_green_v110():
         assert_all_outputs(outputs)
         assert outputs["verified"] == "true", outputs
         assert outputs["complete"] == "true", outputs
+        # Pre-v1.3 bundle: no attestation, and that must NOT fail anything.
+        assert outputs["attestation"] == "false", outputs
         assert outputs["should-fail"] == "false", outputs
         assert outputs["bundle-path"] == ".forgeproof/issue-998.rpack", outputs
         assert "VERIFIED" in outputs["report"], outputs["report"][:400]
@@ -149,7 +155,73 @@ def test_green_v101():
         _, outputs, _ = run_glue(root)
         assert outputs["verified"] == "true", outputs
         assert outputs["complete"] == "true", outputs
+        assert outputs["attestation"] == "false", outputs
         assert outputs["bundle-path"] == ".forgeproof/issue-999.rpack", outputs
+
+
+def test_green_v122():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        deploy("v122", root)
+        _, outputs, _ = run_glue(root)
+        assert outputs["verified"] == "true", outputs
+        assert outputs["complete"] == "true", outputs
+        assert outputs["attestation"] == "false", outputs
+        assert outputs["bundle-path"] == ".forgeproof/issue-997.rpack", outputs
+
+
+def test_green_v130_attested():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        deploy("v130", root)
+        _, outputs, summary = run_glue(root)
+        assert_all_outputs(outputs)
+        assert outputs["verified"] == "true", outputs
+        assert outputs["complete"] == "true", outputs
+        assert outputs["attestation"] == "true", outputs
+        assert outputs["bundle-path"] == ".forgeproof/issue-996.rpack", outputs
+        # The engine's markdown report — reused verbatim by the glue — must
+        # carry the attestation section into the PR comment / job summary.
+        assert "### Attestation" in outputs["report"], outputs["report"][:600]
+        assert "### Attestation" in summary
+
+
+def test_v130_attestation_tamper_fails_verified_not_attestation():
+    # The documented split: `attestation` is PRESENCE, validity is part of
+    # `verified`. Editing the embedded attestation breaks the root digest,
+    # so verified goes false while attestation stays "true" (still present).
+    import base64
+    import json as jsonlib
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        deploy("v130", root)
+        rpack = root / ".forgeproof" / "issue-996.rpack"
+        bundle = jsonlib.loads(rpack.read_text(encoding="utf-8"))
+        payload = bytearray(base64.b64decode(
+            bundle["attestation"]["dsseEnvelope"]["payload"]))
+        payload[10] ^= 1
+        bundle["attestation"]["dsseEnvelope"]["payload"] = (
+            base64.b64encode(bytes(payload)).decode("ascii"))
+        rpack.write_text(jsonlib.dumps(bundle, indent=2), encoding="utf-8")
+
+        _, outputs, _ = run_glue(root)
+        assert outputs["verified"] == "false", outputs
+        assert outputs["should-fail"] == "true", outputs
+        assert outputs["attestation"] == "true", outputs
+        assert "TAMPER" in outputs["report"], outputs["report"][:600]
+
+
+def test_mixed_bundles_attestation_false():
+    # One attested (v130) + one pre-attestation (v110) bundle: verified
+    # stays true, but attestation is "every bundle", so it reads false.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        deploy("v130", root)
+        deploy("v110", root)
+        _, outputs, _ = run_glue(root)
+        assert outputs["verified"] == "true", outputs
+        assert outputs["should-fail"] == "false", outputs
+        assert outputs["attestation"] == "false", outputs
 
 
 def test_strict_incomplete():
@@ -203,6 +275,8 @@ def test_no_bundle_not_required():
         assert outputs["should-fail"] == "false", outputs
         assert outputs["verified"] == "true", outputs
         assert outputs["complete"] == "false", outputs
+        # Vacuous pass is never "attested": nothing was verified.
+        assert outputs["attestation"] == "false", outputs
 
 
 def test_multiple_bundles_green():
@@ -261,6 +335,7 @@ def test_engine_error_unparseable():
         _, outputs, summary = run_glue(root, verifier=broken)
         assert_all_outputs(outputs)
         assert outputs["verified"] == "false", outputs
+        assert outputs["attestation"] == "false", outputs
         assert outputs["should-fail"] == "true", outputs
         assert "boom: engine exploded" in outputs["report"], outputs["report"]
         assert "VERIFICATION ERROR" in summary
@@ -297,6 +372,7 @@ def test_glue_crash_fails_closed():
         assert_all_outputs(outputs)
         assert outputs["verified"] == "false", outputs
         assert outputs["complete"] == "false", outputs
+        assert outputs["attestation"] == "false", outputs
         assert outputs["should-fail"] == "true", outputs
         assert "INTERNAL ERROR" in outputs["report"], outputs["report"][:400]
         assert "RuntimeError" in outputs["report"], outputs["report"][:400]
@@ -308,6 +384,10 @@ def test_glue_crash_fails_closed():
 TESTS = [
     test_green_v110,
     test_green_v101,
+    test_green_v122,
+    test_green_v130_attested,
+    test_v130_attestation_tamper_fails_verified_not_attestation,
+    test_mixed_bundles_attestation_false,
     test_strict_incomplete,
     test_tampered,
     test_no_bundle_required,

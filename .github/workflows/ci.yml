@@ -74,10 +74,12 @@ jobs:
         env:
           VERIFIED: ${{ steps.v110.outputs.verified }}
           COMPLETE: ${{ steps.v110.outputs.complete }}
+          ATTESTATION: ${{ steps.v110.outputs.attestation }}
           SUMMARY_BYTES: ${{ steps.v110.outputs.summary-bytes }}
         run: |
           test "$VERIFIED" = "true" || { echo "::error::v110 verified='$VERIFIED', expected true"; exit 1; }
           test "$COMPLETE" = "true" || { echo "::error::v110 complete='$COMPLETE', expected true"; exit 1; }
+          test "$ATTESTATION" = "false" || { echo "::error::v110 attestation='$ATTESTATION', expected false (pre-v1.3 bundle, silent skip)"; exit 1; }
           test "$SUMMARY_BYTES" -gt 0 2>/dev/null || { echo "::error::v110 summary-bytes='$SUMMARY_BYTES', expected > 0 (job summary not written)"; exit 1; }
 
       - name: Deploy v101 fixture
@@ -101,6 +103,60 @@ jobs:
           test "$VERIFIED" = "true" || { echo "::error::v101 verified='$VERIFIED', expected true"; exit 1; }
           test "$COMPLETE" = "true" || { echo "::error::v101 complete='$COMPLETE', expected true"; exit 1; }
 
+      - name: Deploy v122 fixture
+        shell: bash
+        run: |
+          mkdir -p scratch-v122/.forgeproof scratch-v122/src
+          cp fixtures/v122/chain-997.json fixtures/v122/issue-997.rpack scratch-v122/.forgeproof/
+          cp fixtures/v122/src/example3.py scratch-v122/src/
+      - name: Verify v122
+        id: v122
+        uses: ./
+        with:
+          project-root: scratch-v122
+          comment: "false"
+      - name: Assert v122 green
+        shell: bash
+        env:
+          VERIFIED: ${{ steps.v122.outputs.verified }}
+          COMPLETE: ${{ steps.v122.outputs.complete }}
+          ATTESTATION: ${{ steps.v122.outputs.attestation }}
+        run: |
+          test "$VERIFIED" = "true" || { echo "::error::v122 verified='$VERIFIED', expected true"; exit 1; }
+          test "$COMPLETE" = "true" || { echo "::error::v122 complete='$COMPLETE', expected true"; exit 1; }
+          test "$ATTESTATION" = "false" || { echo "::error::v122 attestation='$ATTESTATION', expected false (pre-v1.3 bundle, silent skip)"; exit 1; }
+
+      # v1.3.0 bundle format v1.1.0: the embedded in-toto attestation must
+      # verify as part of the bundle and surface in both the output and the
+      # report, on the same vendored engine that keeps v101/v110/v122 green.
+      - name: Deploy v130 fixture
+        shell: bash
+        run: |
+          mkdir -p scratch-v130/.forgeproof scratch-v130/src
+          cp fixtures/v130/chain-996.json fixtures/v130/issue-996.rpack scratch-v130/.forgeproof/
+          cp fixtures/v130/src/example4.py scratch-v130/src/
+      - name: Verify v130
+        id: v130
+        uses: ./
+        with:
+          project-root: scratch-v130
+          comment: "false"
+      - name: Assert v130 green and attested
+        shell: bash
+        env:
+          VERIFIED: ${{ steps.v130.outputs.verified }}
+          COMPLETE: ${{ steps.v130.outputs.complete }}
+          ATTESTATION: ${{ steps.v130.outputs.attestation }}
+          REPORT: ${{ steps.v130.outputs.report }}
+        run: |
+          test "$VERIFIED" = "true" || { echo "::error::v130 verified='$VERIFIED', expected true"; exit 1; }
+          test "$COMPLETE" = "true" || { echo "::error::v130 complete='$COMPLETE', expected true"; exit 1; }
+          test "$ATTESTATION" = "true" || { echo "::error::v130 attestation='$ATTESTATION', expected true"; exit 1; }
+          case "$REPORT" in
+            *"### Attestation"*) ;;
+            *) echo "::error::v130 report is missing the '### Attestation' section"; exit 1 ;;
+          esac
+
   tamper-matrix:
     runs-on: ubuntu-latest
     strategy:
@@ -113,16 +169,24 @@ jobs:
           - bundle-field-edit
           - signature-removed
           - signature-whitespace
+          - attestation-field-edit
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy v110 and mutate
+      - name: Deploy fixture and mutate
         shell: bash
         env:
           CASE: ${{ matrix.case }}
         run: |
           mkdir -p scratch/.forgeproof scratch/src
-          cp fixtures/v110/chain-998.json fixtures/v110/issue-998.rpack scratch/.forgeproof/
-          cp fixtures/v110/src/example2.py scratch/src/
+          # attestation-field-edit needs a bundle that HAS an attestation
+          # (v1.3.0 fixture); every other case runs on the frozen v110.
+          if [ "$CASE" = "attestation-field-edit" ]; then
+            cp fixtures/v130/chain-996.json fixtures/v130/issue-996.rpack scratch/.forgeproof/
+            cp fixtures/v130/src/example4.py scratch/src/
+          else
+            cp fixtures/v110/chain-998.json fixtures/v110/issue-998.rpack scratch/.forgeproof/
+            cp fixtures/v110/src/example2.py scratch/src/
+          fi
           PY=$(command -v python3 || command -v python)
           "$PY" - "$CASE" <<'PYEOF'
           import json, sys
@@ -177,6 +241,20 @@ jobs:
               bundle = json.loads(p.read_text(encoding="utf-8"))
               bundle["signature"] = bundle["signature"] + "\n"
               p.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+          elif case == "attestation-field-edit":
+              # v1.3.0: the embedded attestation sits INSIDE root_digest
+              # (unknown keys are hashed via the denylist), so flipping one
+              # payload byte must go red through the Action — no attestation-
+              # specific code path is needed for tamper to be caught.
+              import base64
+              p = root / ".forgeproof" / "issue-996.rpack"
+              bundle = json.loads(p.read_text(encoding="utf-8"))
+              payload = bytearray(base64.b64decode(
+                  bundle["attestation"]["dsseEnvelope"]["payload"]))
+              payload[10] ^= 1
+              bundle["attestation"]["dsseEnvelope"]["payload"] = (
+                  base64.b64encode(bytes(payload)).decode("ascii"))
+              p.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
           else:
               raise SystemExit(f"unknown case: {case}")
           print(f"mutated: {case}")
@@ -193,9 +271,19 @@ jobs:
         env:
           OUTCOME: ${{ steps.tamper.outcome }}
           VERIFIED: ${{ steps.tamper.outputs.verified }}
+          ATTESTATION: ${{ steps.tamper.outputs.attestation }}
+          CASE: ${{ matrix.case }}
         run: |
           test "$OUTCOME" = "failure" || { echo "::error::expected outcome=failure, got '$OUTCOME'"; exit 1; }
           test "$VERIFIED" = "false" || { echo "::error::expected verified=false, got '$VERIFIED'"; exit 1; }
+          # attestation reports PRESENCE, validity lives in `verified`: the
+          # tampered v1.3 bundle still HAS an attestation ("true"), while
+          # every v110 case has none ("false"). Pins the documented split.
+          if [ "$CASE" = "attestation-field-edit" ]; then
+            test "$ATTESTATION" = "true" || { echo "::error::expected attestation=true (present but invalid), got '$ATTESTATION'"; exit 1; }
+          else
+            test "$ATTESTATION" = "false" || { echo "::error::expected attestation=false (pre-v1.3 fixture), got '$ATTESTATION'"; exit 1; }
+          fi
 
   strict-vs-lenient:
     runs-on: ubuntu-latest

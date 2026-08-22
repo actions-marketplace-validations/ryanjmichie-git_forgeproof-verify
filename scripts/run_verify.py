@@ -19,6 +19,13 @@ Outputs written to GITHUB_OUTPUT:
     verified      "true" iff every matched bundle verified
     complete      "true" iff every matched bundle was complete (chain +
                   all artifacts present)
+    attestation   "true" iff every matched bundle embeds an in-toto
+                  attestation (bundle format v1.1.0+); "false" with zero
+                  matched bundles — never vacuously "true". Presence only:
+                  attestation VALIDITY is part of `verified` — the engine
+                  fails verification on a tampered or key-mismatched
+                  attestation. Absence is informational, never a failure
+                  (pre-v1.3 bundles stay green with attestation "false").
     bundle-path   first matched bundle, relative to the project root
     report        aggregated markdown report (heredoc syntax); always ends
                   with the hidden COMMENT_MARKER used for comment upsert
@@ -127,8 +134,9 @@ def verify_bundle(verifier: str, bundle: Path, root: Path,
                   strict: bool) -> dict:
     """Run the engine twice (json for status, markdown for the report).
 
-    Returns {verified, complete, report, log_line}. Fails closed: any
-    engine crash or unparseable stdout counts as not verified.
+    Returns {verified, complete, attested, report, log_line}. Fails
+    closed: any engine crash or unparseable stdout counts as not verified
+    (and not attested).
     """
     rel = bundle_rel(bundle, root)
     proc = run_engine(verifier, bundle, root, strict, "json")
@@ -149,11 +157,17 @@ def verify_bundle(verifier: str, bundle: Path, root: Path,
             "",
             md_fence(proc.stderr or "(no stderr)"),
         ])
-        return {"verified": False, "complete": False, "report": report,
+        return {"verified": False, "complete": False, "attested": False,
+                "report": report,
                 "log_line": f"{rel}: ENGINE ERROR (exit {proc.returncode})"}
 
     verified = data.get("verified") is True
     complete = data.get("complete") is True
+    # Additive v1.3 result key: presence of the embedded in-toto
+    # attestation. Older vendored-engine JSON has no "attestation" key and
+    # pre-v1.3 bundles report present=False — both read as not attested.
+    att = data.get("attestation")
+    attested = isinstance(att, dict) and att.get("present") is True
 
     md_proc = run_engine(verifier, bundle, root, strict, "markdown")
     report = md_proc.stdout.strip()
@@ -168,12 +182,14 @@ def verify_bundle(verifier: str, bundle: Path, root: Path,
             "",
             md_fence(md_proc.stderr or "(no stderr)"),
         ])
-        verified = complete = False
+        verified = complete = attested = False
 
     status = "VERIFIED" if verified else "FAILED"
     suffix = "complete" if complete else "incomplete"
-    return {"verified": verified, "complete": complete, "report": report,
-            "log_line": f"{rel}: {status} ({suffix})"}
+    return {"verified": verified, "complete": complete, "attested": attested,
+            "report": report,
+            "log_line": f"{rel}: {status} ({suffix}"
+                        f"{', attested' if attested else ''})"}
 
 
 def bundle_rel(bundle: Path, root: Path) -> str:
@@ -246,16 +262,17 @@ def write_summary(report: str) -> int:
     return len(data.encode("utf-8"))
 
 
-def emit(report: str, *, verified: bool, complete: bool, bundle_path: str,
-         should_fail: bool) -> None:
+def emit(report: str, *, verified: bool, complete: bool, attested: bool,
+         bundle_path: str, should_fail: bool) -> None:
     """Single exit path for every result shape: marker the report, write
-    the job summary, then write all six step outputs."""
+    the job summary, then write all seven step outputs."""
     report = with_marker(report)
     summary_bytes = write_summary(report)
     print(f"forgeproof-verify: summary written: {summary_bytes} bytes")
     write_outputs({
         "verified": "true" if verified else "false",
         "complete": "true" if complete else "false",
+        "attestation": "true" if attested else "false",
         "bundle-path": bundle_path,
         "should-fail": "true" if should_fail else "false",
         "summary-bytes": str(summary_bytes),
@@ -304,8 +321,8 @@ def main() -> int:
             "This is a bug in the action itself.",
         ])
         print("forgeproof-verify: FATAL: verifier engine not found")
-        emit(report, verified=False, complete=False, bundle_path="",
-             should_fail=True)
+        emit(report, verified=False, complete=False, attested=False,
+             bundle_path="", should_fail=True)
         return 0
 
     bundles = find_bundles(root, pattern)
@@ -315,7 +332,7 @@ def main() -> int:
         print(f"forgeproof-verify: no bundle matched "
               f"({'FAIL' if require_bundle else 'pass — not required'})")
         emit(report, verified=not require_bundle, complete=False,
-             bundle_path="", should_fail=require_bundle)
+             attested=False, bundle_path="", should_fail=require_bundle)
         return 0
 
     print(f"forgeproof-verify: {len(bundles)} bundle(s) matched")
@@ -325,6 +342,7 @@ def main() -> int:
 
     all_verified = all(r["verified"] for r in results)
     all_complete = all(r["complete"] for r in results)
+    all_attested = all(r["attested"] for r in results)
 
     if len(results) == 1:
         report = results[0]["report"]
@@ -342,7 +360,7 @@ def main() -> int:
           f"({'complete' if all_complete else 'incomplete'})")
 
     emit(report, verified=all_verified, complete=all_complete,
-         bundle_path=bundle_rel(bundles[0], root),
+         attested=all_attested, bundle_path=bundle_rel(bundles[0], root),
          should_fail=not all_verified)
     return 0
 
@@ -354,7 +372,7 @@ if __name__ == "__main__":
         try:
             traceback.print_exc()
             emit(crash_report(exc), verified=False, complete=False,
-                 bundle_path="", should_fail=True)
+                 attested=False, bundle_path="", should_fail=True)
             print("forgeproof-verify: INTERNAL ERROR "
                   f"({type(exc).__name__}) — failing closed via should-fail")
             code = 0

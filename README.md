@@ -54,6 +54,7 @@ That is the whole integration for the default layout (bundles under
 |---|---|
 | `verified` | `"true"` iff every matched bundle verified. See [the vacuous case](#the-vacuous-case) below. |
 | `complete` | `"true"` iff every matched bundle was complete: provenance chain and all recorded artifacts present in the checkout. |
+| `attestation` | `"true"` iff every matched bundle embeds an in-toto/SLSA attestation (plugin v1.3.0+); `"false"` when no bundle matched — never vacuously `"true"`. Presence only — validity is part of `verified`. See [Attestations](#attestations-plugin-v130) below. |
 | `bundle-path` | First matched bundle, relative to `project-root`. Empty when none matched. |
 | `report` | The full markdown audit report. Ends with a hidden `<!-- forgeproof-verify -->` marker (see [PR comments](#pr-comments)). |
 | `should-fail` | `"true"` iff the enforce step fails the check: a bundle failed verification, or none matched while `require-bundle` is `"true"`. |
@@ -82,6 +83,27 @@ verified: the action passes with `verified: "true"` (vacuously — there was
 no bundle to fail) and `complete: "false"`. Gate on `complete` if your
 workflow must distinguish "verified provenance" from "no provenance
 present".
+
+## Attestations (plugin v1.3.0+)
+
+Bundles produced by ForgeProof v1.3.0+ (bundle format v1.1.0) embed a
+standards-conformant attestation: an in-toto Statement v1 with a SLSA
+Provenance v1 predicate, DSSE-signed with the same ephemeral Ed25519 key
+that signs the bundle, packaged as a Sigstore bundle. This action verifies
+the attestation as part of bundle verification — the DSSE signature is
+checked against the bundle's own public key, and the attestation subjects
+are cross-checked against the sealed artifact digests. A tampered or
+key-mismatched attestation fails `verified`; the `attestation` output only
+reports whether one is present. Pre-v1.3 bundles verify exactly as before,
+with `attestation: "false"` and no warning.
+
+The same attestation can be verified *outside* this action — with plain
+[cosign](https://github.com/sigstore/cosign) and no ForgeProof code — from
+the `.sigstore.json` + `.pub.pem` sidecars the plugin seals next to the
+bundle; see the plugin's
+[cosign interop guide](https://github.com/ryanjmichie-git/forgeproof-plugin/blob/main/docs/cosign-interop.md).
+This action deliberately does not run cosign: baseline verification stays
+stdlib-only.
 
 ## Fork PRs
 

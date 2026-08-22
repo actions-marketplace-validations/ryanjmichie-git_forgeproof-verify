@@ -51,6 +51,15 @@ outputs:
       "true" iff every matched bundle was complete — provenance chain and
       all recorded artifacts present alongside the bundle.
     value: ${{ steps.verify.outputs.complete }}
+  attestation:
+    description: >-
+      "true" iff every matched bundle embeds an in-toto/SLSA attestation
+      (ForgeProof plugin v1.3.0+, bundle format v1.1.0); "false" when no
+      bundle matched — never vacuously "true". Presence only: attestation
+      validity is part of "verified" — a tampered or key-mismatched
+      attestation fails verification. Absence never fails the check;
+      pre-v1.3 bundles verify green with this output "false".
+    value: ${{ steps.verify.outputs.attestation }}
   bundle-path:
     description: First matched bundle path, relative to project-root.
     value: ${{ steps.verify.outputs.bundle-path }}
